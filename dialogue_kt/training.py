@@ -20,7 +20,7 @@ from dialogue_kt.data_loading import (load_annotated_data, get_kc_result_filenam
                           correct_to_str, standards_to_str, get_model_file_suffix, COMTA_SUBJECTS)
 from dialogue_kt.kt_data_loading import (LMKTDatasetUnpacked, LMKTCollatorUnpacked, LMKTDatasetPacked, LMKTCollatorPacked,
                              DKTDataset, DKTCollator, get_dataloader, apply_annotations)
-from dialogue_kt.prompting import get_true_false_tokens
+from dialogue_kt.prompting import get_true_false_tokens,  get_bloom_tax_tokens
 from dialogue_kt.utils import device, get_checkpoint_path
 
 # ===== Common Functions =====
@@ -193,7 +193,7 @@ def get_lmkt_loss_unpacked(model, batch, true_token, false_token, args):
     loss = torch.nn.BCELoss()(corr_probs, batch["labels"])
     return loss, kc_probs_grouped, corr_probs
 
-def get_lmkt_loss_packed(model, batch, true_token, false_token, args):
+def get_lmkt_loss_packed(model, batch, bloom_package, args):
     # Invert attention mask
     attention_mask = batch["attention_mask"]
     min_dtype = torch.finfo(model.dtype).min
@@ -205,7 +205,10 @@ def get_lmkt_loss_packed(model, batch, true_token, false_token, args):
     batch_size = model_output.logits.shape[0]
     logits = model_output.logits[torch.arange(batch_size).unsqueeze(1), batch["last_idxs"]]
     # Return probability of True token over False token for each sequence
-    logits = torch.stack([logits[:, :, true_token], logits[:, :, false_token]], dim=2)
+    positive_logits = torch.stack([logits[:, :, bloom_package["[APPLY]"]], logits[:, :, bloom_package["[ANALYZE]"]], logits[:, :, bloom_package["[EVALUATE|CREATE]"]]], dim=2).mean(dim=2)
+    negative_logits = torch.stack([logits[:, :, bloom_package["[NONE]"]], logits[:, :, bloom_package["[REMEMBER]"]], logits[:, :, bloom_package["[UNDERSTAND]"]]], dim=2).mean(dim=2)
+    logits = torch.stack([positive_logits, negative_logits], dim=2)
+    # logits = torch.stack([logits[:, :, true_token], logits[:, :, false_token]], dim=2)
     kc_probs = torch.softmax(logits, dim=2)[:, :, 0]
     # Get probability that all KCs are True for each turn in the batch
     kc_probs_grouped = [probs[:num_kcs].tolist() for probs, num_kcs in zip(kc_probs, batch["num_kcs"])]
@@ -219,7 +222,8 @@ def get_lmkt_loss_packed(model, batch, true_token, false_token, args):
         corr_probs = kc_probs.sum(dim=1) / batch["num_kcs"]
     elif args.agg == "mean-geo":
         corr_probs = kc_probs.prod(dim=1) ** (1 / batch["num_kcs"])
-    loss = torch.nn.BCELoss()(corr_probs, batch["labels"])
+    # loss = torch.nn.BCELoss()(corr_probs, batch["labels"])
+    loss = torch.nn.BCELoss()(corr_probs, batch["labels"].to(torch.bfloat16))
     return loss, kc_probs_grouped, corr_probs
 
 def train_lmkt(args, fold):
@@ -244,7 +248,8 @@ def train_lmkt(args, fold):
     val_dataloader = get_dataloader(val_dataset, collator, args.batch_size, False)
 
     # For finding logits for loss
-    true_token, false_token = get_true_false_tokens(tokenizer)
+    # true_token, false_token = get_true_false_tokens(tokenizer)
+    none_token, remember_token, understand_token, apply_token, analyze_token, evaluate_create_token = get_bloom_tax_tokens(tokenizer)
 
     # Do training loop
     if args.optim == "adamw":
@@ -257,9 +262,17 @@ def train_lmkt(args, fold):
         total_train_loss = 0
         total_val_loss = 0
 
+        bloom_package = {
+            "[NONE]":none_token,
+            "[REMEMBER]":remember_token,
+            "[UNDERSTAND]":understand_token,
+            "[APPLY]":apply_token,
+            "[ANALYZE]":analyze_token,
+            "[EVALUATE|CREATE]":evaluate_create_token
+        }
         model.train()
         for batch_idx, batch in enumerate(tqdm(train_dataloader, desc="Training")):
-            loss, _, _ = get_loss(model, batch, true_token, false_token, args)
+            loss, _, _ = get_loss(model, batch, bloom_package, args)
             total_train_loss += loss.item()
             loss = loss / args.grad_accum_steps
             loss.backward()
@@ -272,7 +285,7 @@ def train_lmkt(args, fold):
         with torch.no_grad():
             model.eval()
             for batch in tqdm(val_dataloader, desc="Validating"):
-                loss, _, _ = get_loss(model, batch, true_token, false_token, args)
+                loss, _, _ = get_loss(model, batch, bloom_package, args)
                 total_val_loss += loss.item()
 
         avg_train_loss = total_train_loss / len(train_dataloader)
@@ -305,9 +318,20 @@ def test_lmkt(args, fold):
     test_dataset = KTDataset(test_df, tokenizer, args, skip_first_turn=not args.inc_first_label)
     collator = KTCollator(tokenizer)
     test_dataloader = get_dataloader(test_dataset, collator, args.batch_size, False)
+    
+    none_token, remember_token, understand_token, apply_token, analyze_token, evaluate_create_token = get_bloom_tax_tokens(tokenizer)
 
     # For finding logits for loss
     true_token, false_token = get_true_false_tokens(tokenizer)
+    
+    bloom_package = {
+            "[NONE]":none_token,
+            "[REMEMBER]":remember_token,
+            "[UNDERSTAND]":understand_token,
+            "[APPLY]":apply_token,
+            "[ANALYZE]":analyze_token,
+            "[EVALUATE|CREATE]":evaluate_create_token
+        }
 
     # Collect meta data and predicted KC/correctness probabilities for test set
     dialogue_idx_to_sample_idxs = {}
@@ -320,7 +344,7 @@ def test_lmkt(args, fold):
         for sample_idx, sample in enumerate(batch["meta_data"]):
             dialogue_idx_to_sample_idxs.setdefault(sample["dialogue_idx"], []).append(batch_idx + sample_idx)
         with torch.no_grad():
-            loss, kc_probs, corr_probs = get_loss(model, batch, true_token, false_token, args)
+            loss, kc_probs, corr_probs = get_loss(model, batch, bloom_package, args)
         total_loss += loss.item()
         all_labels.extend(batch["labels"].tolist())
         all_preds.extend(corr_probs.tolist())

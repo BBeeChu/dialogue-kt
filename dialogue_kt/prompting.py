@@ -34,6 +34,16 @@ def get_true_false_tokens(tokenizer: AutoTokenizer):
     false = tokenizer("False").input_ids[-1]
     return true, false
 
+def get_bloom_tax_tokens(tokenizer: AutoTokenizer):
+    none = tokenizer("[NONE]").input_ids[-1]
+    remember = tokenizer("[REMEMBER]").input_ids[-1]
+    understand = tokenizer("[UNDERSTAND]").input_ids[-1]
+    apply = tokenizer("[APPLY]").input_ids[-1]
+    analyze = tokenizer("[ANALYZE]").input_ids[-1]
+    evaluate_create = tokenizer("[EVALUATE|CREATE]").input_ids[-1]
+    # false = tokenizer("False").input_ids[-1]
+    return none, remember, understand, apply, analyze, evaluate_create
+
 
 # ===== Annotation prompting =====
 
@@ -123,10 +133,38 @@ def anno_correctness_system_prompt(args):
 
 # ===== KT model prompting =====
 
-KT_SYSTEM_PROMPT = """You are an experienced math teacher. You are given a dialogue between a student and teacher where {desc} Your job is to predict if the student has a particular knowledge component at the current point in the dialogue. Please follow these instructions carefully when making your prediction:
-- The student will need to possess this knowledge component in order to respond correctly to the teacher's most recent question.
-- Use previous information in the dialogue to determine if the student has this knowledge component or not.
-- Only respond with a single word, "True" or "False"."""
+KT_SYSTEM_PROMPT = """You are an experienced math educator and expert in Bloom's Revised Taxonomy.
+
+You will be given a dialogue between a student and teacher where {desc}. 
+Your task is to determine which cognitive process level of Bloom's Revised Taxonomy best represents the student's understanding of a specific knowledge component (KC) based on the most recent student response.
+
+Please follow these instructions carefully:
+- Read the full dialogue to understand the context.
+- Focus on the student’s most recent utterance.
+- Identify the knowledge component being used or discussed.
+- Based on the student’s utterance, select **one** of the following six levels from Bloom’s Revised Taxonomy that best describes the student’s cognitive behavior:
+
+1. [REMEMBER] - Retrieving relevant knowledge from long-term memory.   
+    Key Words: Recognizing, Recalling
+    Example: Recalling a formula
+2. [UNDERSTAND] – Determining the meaning of instructional messages, including oral, written, and graphic communication.
+    Key Words: Interpreting, Exemplifying, Classifying, Summarizing, Inferring, Comparing, Explaining
+    Example: Explaining a concept
+3. [APPLY] – Carrying out or using a procedure in a given situation.
+    Key Words: Executing, Implementing
+    Example: Applying a formula to solve a problem
+4. [ANALYZE] – Breaking material into its constituent parts and detecting how the parts relate to one another and to an overall structure or purpose.
+    Key Words: Differentiating, Organizing, Attributing
+    Example: Comparing different strategies
+5. [EVALUATE|CREATE] – Making judgments based on criteria and standards, or putting elements together to form a novel, coherent whole or make an original product.
+    Key Words: Checking, Critiquing, Generating, Planning, Producing
+    Example: Evaluating a solution or creating a real-world application.
+Only respond with the level character among "[REMEMBER], [UNDERSTAND], [APPLY], [ANALYZE], and [EVALUATE|CREATE]."
+"""
+# KT_SYSTEM_PROMPT = """You are an experienced math teacher. You are given a dialogue between a student and teacher where {desc} Your job is to predict if the student has a particular knowledge component at the current point in the dialogue. Please follow these instructions carefully when making your prediction:
+# - The student will need to possess this knowledge component in order to respond correctly to the teacher's most recent question.
+# - Use previous information in the dialogue to determine if the student has this knowledge component or not.
+# - Only respond with a single word, "True" or "False"."""
 
 def kt_system_prompt(args):
     return KT_SYSTEM_PROMPT.format(desc=get_dataset_desc(args))
